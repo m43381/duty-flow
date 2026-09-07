@@ -17,6 +17,7 @@ FairnessDimension = Literal[
     "total",
     "weekend",
     "holiday",
+    "count",
 ]
 
 
@@ -43,12 +44,10 @@ def solve_assignment(
             variable = model.new_bool_var(f"x_{slot.id}_{person_id}")
 
             assignment_vars[(slot.id, person_id)] = variable
-
             slot_assignment_vars.append(variable)
 
         # u[slot] = 1 означает, что slot остался незаполненным.
         unfilled = model.new_bool_var(f"unfilled_{slot.id}")
-
         unfilled_vars[slot.id] = unfilled
 
         # Для каждого slot должно выполняться ровно одно:
@@ -196,9 +195,6 @@ def solve_assignment(
             )
 
     # Этапы 4-5: fairness по выходным.
-    #
-    # Общая нагрузка уже зафиксирована на лучшем уровне,
-    # поэтому выходные не могут ухудшить основной баланс.
     weekend_fairness = _add_fairness_dimension(
         model,
         snapshot,
@@ -226,9 +222,6 @@ def solve_assignment(
             )
 
     # Этапы 6-7: fairness по праздникам.
-    #
-    # Она идёт после общей нагрузки и выходных,
-    # поэтому является более низким приоритетом.
     holiday_fairness = _add_fairness_dimension(
         model,
         snapshot,
@@ -241,6 +234,37 @@ def solve_assignment(
             model,
             solver,
             holiday_fairness,
+        )
+
+        if not _has_solution(status):
+            return _empty_result(status)
+
+        if not completed:
+            return _build_result(
+                snapshot,
+                solver,
+                status,
+                assignment_vars,
+                unfilled_vars,
+            )
+
+    # Этапы 8-9: fairness по количеству нарядов.
+    #
+    # Это более низкий приоритет, чем реальная weighted load.
+    # Поэтому solver сначала сохраняет оптимальную общую нагрузку,
+    # выходные и праздники, и только затем выравнивает количество.
+    count_fairness = _add_fairness_dimension(
+        model,
+        snapshot,
+        assignment_vars,
+        dimension="count",
+    )
+
+    if count_fairness is not None:
+        status, completed = _optimize_fairness_dimension(
+            model,
+            solver,
+            count_fairness,
         )
 
         if not _has_solution(status):
@@ -438,17 +462,6 @@ def _add_fairness_dimension(
 
         correction_points = history_corrections[person.id]
 
-        # Базовая цель:
-        #
-        # total_assigned_load
-        #     * fairness_weight
-        #     / total_fairness_weight
-        #
-        # Историческая поправка:
-        #
-        # expected_history - actual_history
-        #
-        # Все вычисления остаются целочисленными.
         target_scaled = (
             total_assigned_load * person.fairness_weight + correction_points * total_fairness_weight
         )
@@ -493,6 +506,9 @@ def _slot_dimension_load(
 
         return 0
 
+    if dimension == "count":
+        return 1
+
     raise ValueError(f"unsupported fairness dimension: {dimension}")
 
 
@@ -509,6 +525,9 @@ def _history_actual(
     if dimension == "holiday":
         return person.history.holiday_load_points
 
+    if dimension == "count":
+        return person.history.duty_count
+
     raise ValueError(f"unsupported fairness dimension: {dimension}")
 
 
@@ -524,6 +543,9 @@ def _history_expected(
 
     if dimension == "holiday":
         return person.history.expected_holiday_load_points
+
+    if dimension == "count":
+        return person.history.expected_duty_count
 
     raise ValueError(f"unsupported fairness dimension: {dimension}")
 

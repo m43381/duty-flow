@@ -1,0 +1,19 @@
+version = 1
+revision = 3
+requires-python = "==3.13.*"
+
+[manifest]
+members = [
+    "duty-flow",
+    "dutyflow-optimizer",
+]
+
+[[package]]
+name = "duty-flow"
+version = "0.1.0"
+source = { virtual = "." }
+
+[[package]]
+name = "dutyflow-optimizer"
+version = "0.1.0"
+source = { editable = "services/optimization" }

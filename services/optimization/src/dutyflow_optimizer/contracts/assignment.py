@@ -143,6 +143,23 @@ class ManualConstraint(ContractModel):
     reason: str | None = None
 
 
+class PreviousExecutionSnapshot(ContractModel):
+    execution_id: UUID
+    person_id: UUID
+
+    starts_at: AwareDatetime
+    ends_at: AwareDatetime
+
+    rest_minutes: NonNegativeInt = 0
+
+    @model_validator(mode="after")
+    def validate_execution(self) -> PreviousExecutionSnapshot:
+        if self.ends_at <= self.starts_at:
+            raise ValueError("previous execution ends_at must be later than starts_at")
+
+        return self
+
+
 class AssignmentOptimizationSnapshot(ContractModel):
     schema_version: Literal["1.0"] = "1.0"
 
@@ -163,6 +180,10 @@ class AssignmentOptimizationSnapshot(ContractModel):
     )
 
     manual_constraints: list[ManualConstraint] = Field(
+        default_factory=list,
+    )
+
+    previous_executions: list[PreviousExecutionSnapshot] = Field(
         default_factory=list,
     )
 
@@ -262,5 +283,17 @@ class AssignmentOptimizationSnapshot(ContractModel):
                     raise ValueError(
                         "FORCE constraint references person who is not eligible for its slot"
                     )
+
+        execution_ids = [execution.execution_id for execution in self.previous_executions]
+
+        if len(execution_ids) != len(set(execution_ids)):
+            raise ValueError("previous_executions must contain unique execution ids")
+
+        for execution in self.previous_executions:
+            if execution.person_id not in known_people:
+                raise ValueError("previous execution references unknown person")
+
+            if execution.starts_at >= self.period.starts_at:
+                raise ValueError("previous execution must start before planning period")
 
         return self

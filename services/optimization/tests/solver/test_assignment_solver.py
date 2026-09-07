@@ -8,6 +8,7 @@ from dutyflow_optimizer.contracts import (
     PeriodSnapshot,
     PersonSnapshot,
     PositionSlotSnapshot,
+    PreviousExecutionSnapshot,
 )
 from dutyflow_optimizer.solver import solve_assignment
 
@@ -38,6 +39,8 @@ def make_slot(
 
 def make_snapshot_with_slots(
     slots: list[PositionSlotSnapshot],
+    *,
+    previous_executions: list[PreviousExecutionSnapshot] | None = None,
 ) -> AssignmentOptimizationSnapshot:
     return AssignmentOptimizationSnapshot(
         run_id=uuid4(),
@@ -51,6 +54,7 @@ def make_snapshot_with_slots(
             PersonSnapshot(id=PERSON_B),
         ],
         slots=slots,
+        previous_executions=previous_executions or [],
     )
 
 
@@ -339,3 +343,63 @@ def test_solver_uses_another_person_when_first_person_has_rest_conflict() -> Non
 
     assert assignments["slot-1"] == PERSON_A
     assert assignments["slot-2"] == PERSON_B
+
+
+def test_previous_execution_blocks_assignment_during_rest() -> None:
+    snapshot = make_snapshot_with_slots(
+        slots=[
+            make_slot(
+                "slot-1",
+                starts_at=datetime(2027, 10, 2, 10, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 3, 10, tzinfo=UTC),
+                eligible_people=[
+                    PERSON_A,
+                    PERSON_B,
+                ],
+            )
+        ],
+        previous_executions=[
+            PreviousExecutionSnapshot(
+                execution_id=uuid4(),
+                person_id=PERSON_A,
+                starts_at=datetime(2027, 9, 30, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 1, 18, tzinfo=UTC),
+                rest_minutes=1440,
+            )
+        ],
+    )
+
+    result = solve_assignment(snapshot)
+
+    assert result.status == "OPTIMAL"
+    assert result.filled_count == 1
+    assert result.assignments[0].person_id == PERSON_B
+
+
+def test_previous_execution_allows_assignment_after_rest_completed() -> None:
+    snapshot = make_snapshot_with_slots(
+        slots=[
+            make_slot(
+                "slot-1",
+                starts_at=datetime(2027, 10, 2, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 3, 18, tzinfo=UTC),
+                eligible_people=[PERSON_A],
+            )
+        ],
+        previous_executions=[
+            PreviousExecutionSnapshot(
+                execution_id=uuid4(),
+                person_id=PERSON_A,
+                starts_at=datetime(2027, 9, 30, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 1, 18, tzinfo=UTC),
+                rest_minutes=1440,
+            )
+        ],
+    )
+
+    result = solve_assignment(snapshot)
+
+    assert result.status == "OPTIMAL"
+    assert result.filled_count == 1
+    assert result.unfilled_count == 0
+    assert result.assignments[0].person_id == PERSON_A

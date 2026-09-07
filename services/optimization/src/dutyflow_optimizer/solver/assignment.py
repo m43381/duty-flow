@@ -81,6 +81,29 @@ def solve_assignment(
 
             model.add(first_variable + second_variable <= 1)
 
+    # Фактически отработанные наряды до начала периода
+    # могут блокировать первые слоты нового периода.
+    for execution in snapshot.previous_executions:
+        protected_until = execution.ends_at + timedelta(
+            minutes=execution.rest_minutes,
+        )
+
+        for slot in snapshot.slots:
+            if execution.person_id not in slot.eligible_people:
+                continue
+
+            if protected_until <= slot.starts_at:
+                continue
+
+            variable = assignment_vars[
+                (
+                    slot.id,
+                    execution.person_id,
+                )
+            ]
+
+            model.add(variable == 0)
+
     # Locked назначения обязаны сохраниться.
     for assignment in snapshot.existing_assignments:
         if not assignment.locked:

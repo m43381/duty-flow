@@ -1,7 +1,9 @@
 from dutyflow_optimizer.contracts.assignment import (
     AssignmentOptimizationSnapshot,
     CalendarFlags,
+    ExistingAssignmentSnapshot,
     HistorySnapshot,
+    ManualConstraint,
     OptimizationSettings,
     PeriodSnapshot,
     PersonSnapshot,
@@ -11,7 +13,9 @@ from dutyflow_optimizer.contracts.assignment import (
 __all__ = [
     "AssignmentOptimizationSnapshot",
     "CalendarFlags",
+    "ExistingAssignmentSnapshot",
     "HistorySnapshot",
+    "ManualConstraint",
     "OptimizationSettings",
     "PeriodSnapshot",
     "PersonSnapshot",

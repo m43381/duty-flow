@@ -1,0 +1,209 @@
+{
+  "schema_version": "1.0",
+  "run_id": "00000000-0000-0000-0000-000000000001",
+  "unit_id": "10000000-0000-0000-0000-000000000001",
+
+  "period": {
+    "starts_at": "2027-10-01T00:00:00+03:00",
+    "ends_at": "2027-11-01T00:00:00+03:00"
+  },
+
+  "settings": {
+    "profile": "BALANCED",
+    "time_limit_seconds": 60,
+    "history_days": 90,
+    "load_scale": 100,
+    "max_history_correction_percent": 30
+  },
+
+  "people": [
+    {
+      "id": "20000000-0000-0000-0000-000000000001",
+      "fairness_weight": 1000,
+      "history": {
+        "actual_load_points": 800,
+        "expected_load_points": 800,
+        "weekend_load_points": 200,
+        "expected_weekend_load_points": 200,
+        "holiday_load_points": 0,
+        "expected_holiday_load_points": 0,
+        "duty_count": 5,
+        "expected_duty_count": 5
+      }
+    },
+    {
+      "id": "20000000-0000-0000-0000-000000000002",
+      "fairness_weight": 1000,
+      "history": {
+        "actual_load_points": 1100,
+        "expected_load_points": 800,
+        "weekend_load_points": 350,
+        "expected_weekend_load_points": 200,
+        "holiday_load_points": 100,
+        "expected_holiday_load_points": 0,
+        "duty_count": 6,
+        "expected_duty_count": 5
+      }
+    },
+    {
+      "id": "20000000-0000-0000-0000-000000000003",
+      "fairness_weight": 1000,
+      "history": {
+        "actual_load_points": 500,
+        "expected_load_points": 800,
+        "weekend_load_points": 100,
+        "expected_weekend_load_points": 200,
+        "holiday_load_points": 0,
+        "expected_holiday_load_points": 0,
+        "duty_count": 3,
+        "expected_duty_count": 5
+      }
+    },
+    {
+      "id": "20000000-0000-0000-0000-000000000004",
+      "fairness_weight": 500,
+      "history": {
+        "actual_load_points": 400,
+        "expected_load_points": 400,
+        "weekend_load_points": 100,
+        "expected_weekend_load_points": 100,
+        "holiday_load_points": 0,
+        "expected_holiday_load_points": 0,
+        "duty_count": 2,
+        "expected_duty_count": 2
+      }
+    }
+  ],
+
+  "slots": [
+    {
+      "id": "slot-01",
+      "occurrence_id": "30000000-0000-0000-0000-000000000001",
+      "duty_type_id": "40000000-0000-0000-0000-000000000001",
+      "position_id": "50000000-0000-0000-0000-000000000001",
+      "starts_at": "2027-10-03T18:00:00+03:00",
+      "ends_at": "2027-10-04T18:00:00+03:00",
+      "rest_minutes": 1440,
+      "load_points": 150,
+      "calendar": {
+        "is_weekend": true,
+        "is_holiday": false
+      },
+      "eligible_people": [
+        "20000000-0000-0000-0000-000000000001",
+        "20000000-0000-0000-0000-000000000002",
+        "20000000-0000-0000-0000-000000000003"
+      ],
+      "exclusion_summary": {
+        "NO_PERMIT": 1
+      }
+    },
+    {
+      "id": "slot-02",
+      "occurrence_id": "30000000-0000-0000-0000-000000000002",
+      "duty_type_id": "40000000-0000-0000-0000-000000000001",
+      "position_id": "50000000-0000-0000-0000-000000000001",
+      "starts_at": "2027-10-06T18:00:00+03:00",
+      "ends_at": "2027-10-07T18:00:00+03:00",
+      "rest_minutes": 1440,
+      "load_points": 100,
+      "eligible_people": [
+        "20000000-0000-0000-0000-000000000001",
+        "20000000-0000-0000-0000-000000000002",
+        "20000000-0000-0000-0000-000000000003",
+        "20000000-0000-0000-0000-000000000004"
+      ]
+    },
+    {
+      "id": "slot-03",
+      "occurrence_id": "30000000-0000-0000-0000-000000000003",
+      "duty_type_id": "40000000-0000-0000-0000-000000000002",
+      "position_id": "50000000-0000-0000-0000-000000000001",
+      "starts_at": "2027-10-10T18:00:00+03:00",
+      "ends_at": "2027-10-11T18:00:00+03:00",
+      "rest_minutes": 1440,
+      "load_points": 250,
+      "calendar": {
+        "is_weekend": true,
+        "is_holiday": false
+      },
+      "eligible_people": [
+        "20000000-0000-0000-0000-000000000001",
+        "20000000-0000-0000-0000-000000000003"
+      ],
+      "exclusion_summary": {
+        "ATTRIBUTE_MISMATCH": 2
+      }
+    },
+    {
+      "id": "slot-04",
+      "occurrence_id": "30000000-0000-0000-0000-000000000004",
+      "duty_type_id": "40000000-0000-0000-0000-000000000001",
+      "position_id": "50000000-0000-0000-0000-000000000001",
+      "starts_at": "2027-10-13T18:00:00+03:00",
+      "ends_at": "2027-10-14T18:00:00+03:00",
+      "rest_minutes": 1440,
+      "load_points": 100,
+      "eligible_people": [
+        "20000000-0000-0000-0000-000000000001",
+        "20000000-0000-0000-0000-000000000002",
+        "20000000-0000-0000-0000-000000000003",
+        "20000000-0000-0000-0000-000000000004"
+      ]
+    },
+    {
+      "id": "slot-05",
+      "occurrence_id": "30000000-0000-0000-0000-000000000005",
+      "duty_type_id": "40000000-0000-0000-0000-000000000002",
+      "position_id": "50000000-0000-0000-0000-000000000001",
+      "starts_at": "2027-10-17T18:00:00+03:00",
+      "ends_at": "2027-10-18T18:00:00+03:00",
+      "rest_minutes": 2880,
+      "load_points": 250,
+      "calendar": {
+        "is_weekend": true,
+        "is_holiday": false
+      },
+      "eligible_people": [
+        "20000000-0000-0000-0000-000000000001",
+        "20000000-0000-0000-0000-000000000003"
+      ]
+    },
+    {
+      "id": "slot-06",
+      "occurrence_id": "30000000-0000-0000-0000-000000000006",
+      "duty_type_id": "40000000-0000-0000-0000-000000000001",
+      "position_id": "50000000-0000-0000-0000-000000000001",
+      "starts_at": "2027-10-21T18:00:00+03:00",
+      "ends_at": "2027-10-22T18:00:00+03:00",
+      "rest_minutes": 1440,
+      "load_points": 100,
+      "eligible_people": [
+        "20000000-0000-0000-0000-000000000001",
+        "20000000-0000-0000-0000-000000000002",
+        "20000000-0000-0000-0000-000000000003",
+        "20000000-0000-0000-0000-000000000004"
+      ]
+    }
+  ],
+
+  "existing_assignments": [
+    {
+      "assignment_id": "60000000-0000-0000-0000-000000000001",
+      "slot_id": "slot-03",
+      "person_id": "20000000-0000-0000-0000-000000000001",
+      "source": "MANUAL",
+      "locked": true,
+      "published": false
+    }
+  ],
+
+  "manual_constraints": [
+    {
+      "type": "FORBID",
+      "slot_id": "slot-06",
+      "person_id": "20000000-0000-0000-0000-000000000002",
+      "reason": "operator decision"
+    }
+  ]
+}

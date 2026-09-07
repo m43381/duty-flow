@@ -5,7 +5,6 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-
 NonNegativeInt = Annotated[int, Field(ge=0)]
 
 
@@ -124,6 +123,26 @@ class OptimizationSettings(ContractModel):
     )
 
 
+class ExistingAssignmentSnapshot(ContractModel):
+    assignment_id: UUID
+    slot_id: str = Field(min_length=1)
+    person_id: UUID
+
+    source: Literal["AUTO", "MANUAL", "IMPORT"]
+
+    locked: bool = False
+    published: bool = False
+
+
+class ManualConstraint(ContractModel):
+    type: Literal["FORCE", "FORBID"]
+
+    slot_id: str = Field(min_length=1)
+    person_id: UUID
+
+    reason: str | None = None
+
+
 class AssignmentOptimizationSnapshot(ContractModel):
     schema_version: Literal["1.0"] = "1.0"
 
@@ -139,6 +158,14 @@ class AssignmentOptimizationSnapshot(ContractModel):
     people: list[PersonSnapshot]
     slots: list[PositionSlotSnapshot]
 
+    existing_assignments: list[ExistingAssignmentSnapshot] = Field(
+        default_factory=list,
+    )
+
+    manual_constraints: list[ManualConstraint] = Field(
+        default_factory=list,
+    )
+
     @model_validator(mode="after")
     def validate_references(self) -> AssignmentOptimizationSnapshot:
         person_ids = [person.id for person in self.people]
@@ -152,6 +179,7 @@ class AssignmentOptimizationSnapshot(ContractModel):
             raise ValueError("slots must contain unique ids")
 
         known_people = set(person_ids)
+        known_slots = set(slot_ids)
 
         for slot in self.slots:
             unknown_people = set(slot.eligible_people) - known_people
@@ -160,5 +188,79 @@ class AssignmentOptimizationSnapshot(ContractModel):
                 unknown = ", ".join(sorted(str(person_id) for person_id in unknown_people))
 
                 raise ValueError(f"slot {slot.id} references unknown eligible people: {unknown}")
+
+        assignment_ids = [assignment.assignment_id for assignment in self.existing_assignments]
+
+        if len(assignment_ids) != len(set(assignment_ids)):
+            raise ValueError("existing_assignments must contain unique assignment ids")
+
+        assignment_slots = [assignment.slot_id for assignment in self.existing_assignments]
+
+        if len(assignment_slots) != len(set(assignment_slots)):
+            raise ValueError("existing_assignments must contain at most one assignment per slot")
+
+        for assignment in self.existing_assignments:
+            if assignment.person_id not in known_people:
+                raise ValueError(
+                    f"existing assignment {assignment.assignment_id} references unknown person"
+                )
+
+            if assignment.slot_id not in known_slots:
+                raise ValueError(
+                    f"existing assignment {assignment.assignment_id} references unknown slot"
+                )
+
+            slot = next(slot for slot in self.slots if slot.id == assignment.slot_id)
+
+            if assignment.person_id not in slot.eligible_people:
+                raise ValueError(
+                    f"existing assignment {assignment.assignment_id} "
+                    "references person who is not eligible for its slot"
+                )
+
+        forced_slots: set[str] = set()
+        constraint_pairs: set[tuple[str, UUID, str]] = set()
+
+        for constraint in self.manual_constraints:
+            if constraint.person_id not in known_people:
+                raise ValueError("manual constraint references unknown person")
+
+            if constraint.slot_id not in known_slots:
+                raise ValueError("manual constraint references unknown slot")
+
+            pair = (
+                constraint.slot_id,
+                constraint.person_id,
+                constraint.type,
+            )
+
+            if pair in constraint_pairs:
+                raise ValueError("manual_constraints must not contain duplicates")
+
+            constraint_pairs.add(pair)
+
+            opposite_type = "FORBID" if constraint.type == "FORCE" else "FORCE"
+
+            opposite_pair = (
+                constraint.slot_id,
+                constraint.person_id,
+                opposite_type,
+            )
+
+            if opposite_pair in constraint_pairs:
+                raise ValueError("the same person and slot cannot be both FORCE and FORBID")
+
+            if constraint.type == "FORCE":
+                if constraint.slot_id in forced_slots:
+                    raise ValueError("a slot cannot have more than one FORCE constraint")
+
+                forced_slots.add(constraint.slot_id)
+
+                slot = next(slot for slot in self.slots if slot.id == constraint.slot_id)
+
+                if constraint.person_id not in slot.eligible_people:
+                    raise ValueError(
+                        "FORCE constraint references person who is not eligible for its slot"
+                    )
 
         return self

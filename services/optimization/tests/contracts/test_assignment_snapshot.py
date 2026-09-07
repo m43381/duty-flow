@@ -2,14 +2,127 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
-
 from dutyflow_optimizer.contracts import (
     AssignmentOptimizationSnapshot,
+    ExistingAssignmentSnapshot,
+    ManualConstraint,
     PeriodSnapshot,
     PersonSnapshot,
     PositionSlotSnapshot,
 )
+from pydantic import ValidationError
+
+
+def test_force_rejects_ineligible_person() -> None:
+    eligible_person_id = uuid4()
+    ineligible_person_id = uuid4()
+
+    with pytest.raises(
+        ValidationError,
+        match="FORCE constraint references person",
+    ):
+        AssignmentOptimizationSnapshot(
+            run_id=uuid4(),
+            unit_id=uuid4(),
+            period=PeriodSnapshot(
+                starts_at=datetime(2027, 10, 1, tzinfo=UTC),
+                ends_at=datetime(2027, 11, 1, tzinfo=UTC),
+            ),
+            people=[
+                PersonSnapshot(id=eligible_person_id),
+                PersonSnapshot(id=ineligible_person_id),
+            ],
+            slots=[
+                PositionSlotSnapshot(
+                    id="slot-1",
+                    occurrence_id=uuid4(),
+                    duty_type_id=uuid4(),
+                    position_id=uuid4(),
+                    starts_at=datetime(
+                        2027,
+                        10,
+                        10,
+                        18,
+                        tzinfo=UTC,
+                    ),
+                    ends_at=datetime(
+                        2027,
+                        10,
+                        11,
+                        18,
+                        tzinfo=UTC,
+                    ),
+                    load_points=100,
+                    eligible_people=[
+                        eligible_person_id,
+                    ],
+                )
+            ],
+            manual_constraints=[
+                ManualConstraint(
+                    type="FORCE",
+                    slot_id="slot-1",
+                    person_id=ineligible_person_id,
+                )
+            ],
+        )
+
+
+def test_locked_assignment_must_reference_eligible_person() -> None:
+    eligible_person_id = uuid4()
+    ineligible_person_id = uuid4()
+
+    with pytest.raises(
+        ValidationError,
+        match="not eligible",
+    ):
+        AssignmentOptimizationSnapshot(
+            run_id=uuid4(),
+            unit_id=uuid4(),
+            period=PeriodSnapshot(
+                starts_at=datetime(2027, 10, 1, tzinfo=UTC),
+                ends_at=datetime(2027, 11, 1, tzinfo=UTC),
+            ),
+            people=[
+                PersonSnapshot(id=eligible_person_id),
+                PersonSnapshot(id=ineligible_person_id),
+            ],
+            slots=[
+                PositionSlotSnapshot(
+                    id="slot-1",
+                    occurrence_id=uuid4(),
+                    duty_type_id=uuid4(),
+                    position_id=uuid4(),
+                    starts_at=datetime(
+                        2027,
+                        10,
+                        10,
+                        18,
+                        tzinfo=UTC,
+                    ),
+                    ends_at=datetime(
+                        2027,
+                        10,
+                        11,
+                        18,
+                        tzinfo=UTC,
+                    ),
+                    load_points=100,
+                    eligible_people=[
+                        eligible_person_id,
+                    ],
+                )
+            ],
+            existing_assignments=[
+                ExistingAssignmentSnapshot(
+                    assignment_id=uuid4(),
+                    slot_id="slot-1",
+                    person_id=ineligible_person_id,
+                    source="MANUAL",
+                    locked=True,
+                )
+            ],
+        )
 
 
 def test_valid_assignment_snapshot() -> None:

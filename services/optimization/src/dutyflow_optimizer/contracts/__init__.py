@@ -12,12 +12,17 @@ from dutyflow_optimizer.contracts.assignment import (
 )
 from dutyflow_optimizer.contracts.result import (
     AssignmentDecision,
+    AssignmentMetrics,
     AssignmentOptimizationResult,
+    PersonAssignmentMetrics,
     SolverStatus,
+    UnfilledReasonCode,
+    UnfilledSlotDetail,
 )
 
 __all__ = [
     "AssignmentDecision",
+    "AssignmentMetrics",
     "AssignmentOptimizationResult",
     "AssignmentOptimizationSnapshot",
     "CalendarFlags",
@@ -26,8 +31,11 @@ __all__ = [
     "ManualConstraint",
     "OptimizationSettings",
     "PeriodSnapshot",
+    "PersonAssignmentMetrics",
     "PersonSnapshot",
     "PositionSlotSnapshot",
     "PreviousExecutionSnapshot",
     "SolverStatus",
+    "UnfilledReasonCode",
+    "UnfilledSlotDetail",
 ]

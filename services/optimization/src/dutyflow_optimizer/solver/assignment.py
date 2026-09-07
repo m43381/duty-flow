@@ -7,10 +7,13 @@ from ortools.sat.python import cp_model
 
 from dutyflow_optimizer.contracts import (
     AssignmentDecision,
+    AssignmentMetrics,
     AssignmentOptimizationResult,
     AssignmentOptimizationSnapshot,
+    PersonAssignmentMetrics,
     PersonSnapshot,
     PositionSlotSnapshot,
+    UnfilledSlotDetail,
 )
 
 FairnessDimension = Literal[
@@ -44,14 +47,14 @@ def solve_assignment(
             variable = model.new_bool_var(f"x_{slot.id}_{person_id}")
 
             assignment_vars[(slot.id, person_id)] = variable
+
             slot_assignment_vars.append(variable)
 
         # u[slot] = 1 означает, что slot остался незаполненным.
         unfilled = model.new_bool_var(f"unfilled_{slot.id}")
+
         unfilled_vars[slot.id] = unfilled
 
-        # Для каждого slot должно выполняться ровно одно:
-        # либо назначен один человек, либо slot явно UNFILLED.
         model.add(sum(slot_assignment_vars) + unfilled == 1)
 
     # Один человек не может одновременно стоять
@@ -150,7 +153,10 @@ def solve_assignment(
     status = solver.solve(model)
 
     if not _has_solution(status):
-        return _empty_result(status)
+        return _empty_result(
+            snapshot,
+            status,
+        )
 
     if status != cp_model.OPTIMAL:
         return _build_result(
@@ -163,11 +169,9 @@ def solve_assignment(
 
     best_unfilled = sum(solver.value(variable) for variable in unfilled_vars.values())
 
-    # Ни один следующий fairness-этап не имеет права
-    # ухудшить максимально возможное заполнение.
     model.add(sum(unfilled_vars.values()) == best_unfilled)
 
-    # Этапы 2-3: главная fairness по общей нагрузке.
+    # Этапы 2-3: общая weighted load.
     total_fairness = _add_fairness_dimension(
         model,
         snapshot,
@@ -183,7 +187,10 @@ def solve_assignment(
         )
 
         if not _has_solution(status):
-            return _empty_result(status)
+            return _empty_result(
+                snapshot,
+                status,
+            )
 
         if not completed:
             return _build_result(
@@ -194,7 +201,7 @@ def solve_assignment(
                 unfilled_vars,
             )
 
-    # Этапы 4-5: fairness по выходным.
+    # Этапы 4-5: выходные.
     weekend_fairness = _add_fairness_dimension(
         model,
         snapshot,
@@ -210,7 +217,10 @@ def solve_assignment(
         )
 
         if not _has_solution(status):
-            return _empty_result(status)
+            return _empty_result(
+                snapshot,
+                status,
+            )
 
         if not completed:
             return _build_result(
@@ -221,7 +231,7 @@ def solve_assignment(
                 unfilled_vars,
             )
 
-    # Этапы 6-7: fairness по праздникам.
+    # Этапы 6-7: праздники.
     holiday_fairness = _add_fairness_dimension(
         model,
         snapshot,
@@ -237,7 +247,10 @@ def solve_assignment(
         )
 
         if not _has_solution(status):
-            return _empty_result(status)
+            return _empty_result(
+                snapshot,
+                status,
+            )
 
         if not completed:
             return _build_result(
@@ -248,11 +261,7 @@ def solve_assignment(
                 unfilled_vars,
             )
 
-    # Этапы 8-9: fairness по количеству нарядов.
-    #
-    # Это более низкий приоритет, чем реальная weighted load.
-    # Поэтому solver сначала сохраняет оптимальную общую нагрузку,
-    # выходные и праздники, и только затем выравнивает количество.
+    # Этапы 8-9: количество нарядов.
     count_fairness = _add_fairness_dimension(
         model,
         snapshot,
@@ -268,7 +277,10 @@ def solve_assignment(
         )
 
         if not _has_solution(status):
-            return _empty_result(status)
+            return _empty_result(
+                snapshot,
+                status,
+            )
 
         if not completed:
             return _build_result(
@@ -298,7 +310,6 @@ def _optimize_fairness_dimension(
 ) -> tuple[int, bool]:
     max_deviation, deviations = fairness
 
-    # Сначала минимизируем худшее индивидуальное отклонение.
     model.minimize(max_deviation)
 
     status = solver.solve(model)
@@ -313,8 +324,6 @@ def _optimize_fairness_dimension(
 
     model.add(max_deviation == best_max_deviation)
 
-    # Затем, не ухудшая worst-case, минимизируем
-    # сумму отклонений всех людей.
     total_deviation = sum(deviations)
 
     model.minimize(total_deviation)
@@ -329,8 +338,6 @@ def _optimize_fairness_dimension(
 
     best_total_deviation = sum(solver.value(deviation) for deviation in deviations)
 
-    # Следующая fairness-размерность не имеет права
-    # ухудшить уже найденный optimum этой размерности.
     model.add(total_deviation == best_total_deviation)
 
     return status, True
@@ -434,9 +441,6 @@ def _add_fairness_dimension(
         for person in participating_people
     }
 
-    # Историческая поправка может сместить цель максимум
-    # на 100% базовой доли, поэтому удвоенного диапазона
-    # достаточно для absolute deviation.
     max_scaled_deviation = 2 * total_dimension_load * total_fairness_weight
 
     deviations: list[cp_model.IntVar] = []
@@ -621,22 +625,200 @@ def _build_result(
         if not assigned and solver.value(unfilled_vars[slot.id]):
             unfilled_slots.append(slot.id)
 
+    assignments_by_slot = {assignment.slot_id: assignment.person_id for assignment in assignments}
+
+    unfilled_details = [
+        _diagnose_unfilled_slot(
+            snapshot,
+            slot_id,
+            assignments_by_slot,
+        )
+        for slot_id in unfilled_slots
+    ]
+
+    metrics = _build_metrics(
+        snapshot,
+        assignments,
+        unfilled_slots,
+    )
+
     return AssignmentOptimizationResult(
         status=_status_name(status),
         assignments=assignments,
         unfilled_slots=unfilled_slots,
+        unfilled_details=unfilled_details,
         filled_count=len(assignments),
         unfilled_count=len(unfilled_slots),
+        metrics=metrics,
+    )
+
+
+def _diagnose_unfilled_slot(
+    snapshot: AssignmentOptimizationSnapshot,
+    slot_id: str,
+    assignments_by_slot: dict[str, UUID],
+) -> UnfilledSlotDetail:
+    slot_by_id = {slot.id: slot for slot in snapshot.slots}
+
+    slot = slot_by_id[slot_id]
+    eligible_people = set(slot.eligible_people)
+
+    if not eligible_people:
+        return UnfilledSlotDetail(
+            slot_id=slot.id,
+            reason_code="NO_ELIGIBLE_PEOPLE",
+            eligible_count=0,
+            exclusion_summary=slot.exclusion_summary,
+        )
+
+    manual_forbidden = {
+        constraint.person_id
+        for constraint in snapshot.manual_constraints
+        if (
+            constraint.slot_id == slot.id
+            and constraint.type == "FORBID"
+            and constraint.person_id in eligible_people
+        )
+    }
+
+    previous_rest_blocked: set[UUID] = set()
+
+    for execution in snapshot.previous_executions:
+        if execution.person_id not in eligible_people:
+            continue
+
+        protected_until = execution.ends_at + timedelta(
+            minutes=execution.rest_minutes,
+        )
+
+        if protected_until > slot.starts_at:
+            previous_rest_blocked.add(execution.person_id)
+
+    assigned_conflict: set[UUID] = set()
+
+    for other_slot_id, person_id in assignments_by_slot.items():
+        if person_id not in eligible_people:
+            continue
+
+        other_slot = slot_by_id[other_slot_id]
+
+        if _slots_conflict(
+            slot,
+            other_slot,
+        ):
+            assigned_conflict.add(person_id)
+
+    blocking_summary = {
+        "MANUAL_FORBID": len(manual_forbidden),
+        "PREVIOUS_REST": len(previous_rest_blocked),
+        "ASSIGNED_CONFLICT": len(assigned_conflict),
+    }
+
+    blocking_summary = {reason: count for reason, count in blocking_summary.items() if count > 0}
+
+    if manual_forbidden == eligible_people:
+        reason_code = "MANUAL_FORBID"
+
+    elif previous_rest_blocked == eligible_people:
+        reason_code = "REST_CONSTRAINT"
+
+    elif (manual_forbidden | previous_rest_blocked | assigned_conflict) == eligible_people:
+        reason_code = "CAPACITY_SHORTAGE"
+
+    else:
+        # Для v0.1 не пытаемся придумывать ложную точную причину.
+        # Более глубокую конфликтную диагностику добавим позже.
+        reason_code = "UNKNOWN"
+
+    return UnfilledSlotDetail(
+        slot_id=slot.id,
+        reason_code=reason_code,
+        eligible_count=len(eligible_people),
+        exclusion_summary=slot.exclusion_summary,
+        blocking_summary=blocking_summary,
+    )
+
+
+def _build_metrics(
+    snapshot: AssignmentOptimizationSnapshot,
+    assignments: list[AssignmentDecision],
+    unfilled_slots: list[str],
+) -> AssignmentMetrics:
+    slot_by_id = {slot.id: slot for slot in snapshot.slots}
+
+    person_metrics = {
+        person.id: {
+            "assignment_count": 0,
+            "load_points": 0,
+            "weekend_load_points": 0,
+            "holiday_load_points": 0,
+        }
+        for person in snapshot.people
+    }
+
+    assigned_load_points = 0
+    weekend_load_points = 0
+    holiday_load_points = 0
+
+    for assignment in assignments:
+        slot = slot_by_id[assignment.slot_id]
+
+        metrics = person_metrics[assignment.person_id]
+
+        metrics["assignment_count"] += 1
+        metrics["load_points"] += slot.load_points
+
+        assigned_load_points += slot.load_points
+
+        if slot.calendar.is_weekend:
+            metrics["weekend_load_points"] += slot.load_points
+            weekend_load_points += slot.load_points
+
+        if slot.calendar.is_holiday:
+            metrics["holiday_load_points"] += slot.load_points
+            holiday_load_points += slot.load_points
+
+    total_slots = len(snapshot.slots)
+    filled_count = len(assignments)
+    unfilled_count = len(unfilled_slots)
+
+    if total_slots == 0:
+        coverage_percent = 100.0
+    else:
+        coverage_percent = round(
+            filled_count / total_slots * 100,
+            2,
+        )
+
+    people = [
+        PersonAssignmentMetrics(
+            person_id=person.id,
+            **person_metrics[person.id],
+        )
+        for person in snapshot.people
+    ]
+
+    return AssignmentMetrics(
+        total_slots=total_slots,
+        filled_count=filled_count,
+        unfilled_count=unfilled_count,
+        coverage_percent=coverage_percent,
+        assigned_load_points=assigned_load_points,
+        weekend_load_points=weekend_load_points,
+        holiday_load_points=holiday_load_points,
+        people=people,
     )
 
 
 def _empty_result(
+    snapshot: AssignmentOptimizationSnapshot,
     status: int,
 ) -> AssignmentOptimizationResult:
     return AssignmentOptimizationResult(
         status=_status_name(status),
         filled_count=0,
         unfilled_count=0,
+        metrics=None,
     )
 
 

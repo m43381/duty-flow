@@ -12,15 +12,53 @@ from dutyflow_optimizer.contracts import (
 from dutyflow_optimizer.solver import solve_assignment
 
 PERSON_A = UUID("20000000-0000-0000-0000-000000000001")
-
 PERSON_B = UUID("20000000-0000-0000-0000-000000000002")
+
+
+def make_slot(
+    slot_id: str,
+    *,
+    starts_at: datetime,
+    ends_at: datetime,
+    eligible_people: list[UUID],
+    rest_minutes: int = 0,
+) -> PositionSlotSnapshot:
+    return PositionSlotSnapshot(
+        id=slot_id,
+        occurrence_id=uuid4(),
+        duty_type_id=uuid4(),
+        position_id=uuid4(),
+        starts_at=starts_at,
+        ends_at=ends_at,
+        rest_minutes=rest_minutes,
+        load_points=100,
+        eligible_people=eligible_people,
+    )
+
+
+def make_snapshot_with_slots(
+    slots: list[PositionSlotSnapshot],
+) -> AssignmentOptimizationSnapshot:
+    return AssignmentOptimizationSnapshot(
+        run_id=uuid4(),
+        unit_id=uuid4(),
+        period=PeriodSnapshot(
+            starts_at=datetime(2027, 10, 1, tzinfo=UTC),
+            ends_at=datetime(2027, 11, 1, tzinfo=UTC),
+        ),
+        people=[
+            PersonSnapshot(id=PERSON_A),
+            PersonSnapshot(id=PERSON_B),
+        ],
+        slots=slots,
+    )
 
 
 def make_snapshot(
     eligible_people: list[UUID],
     *,
-    existing_assignments: (list[ExistingAssignmentSnapshot] | None) = None,
-    manual_constraints: (list[ManualConstraint] | None) = None,
+    existing_assignments: list[ExistingAssignmentSnapshot] | None = None,
+    manual_constraints: list[ManualConstraint] | None = None,
 ) -> AssignmentOptimizationSnapshot:
     return AssignmentOptimizationSnapshot(
         run_id=uuid4(),
@@ -82,7 +120,6 @@ def test_solver_fills_slot_when_candidate_exists() -> None:
     assert result.status == "OPTIMAL"
     assert result.filled_count == 1
     assert result.unfilled_count == 0
-
     assert result.assignments[0].person_id == PERSON_A
 
 
@@ -191,3 +228,114 @@ def test_conflicting_lock_and_force_is_infeasible() -> None:
     result = solve_assignment(snapshot)
 
     assert result.status == "INFEASIBLE"
+
+
+def test_solver_does_not_assign_same_person_to_overlapping_slots() -> None:
+    snapshot = make_snapshot_with_slots(
+        slots=[
+            make_slot(
+                "slot-1",
+                starts_at=datetime(2027, 10, 10, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 11, 18, tzinfo=UTC),
+                eligible_people=[PERSON_A],
+            ),
+            make_slot(
+                "slot-2",
+                starts_at=datetime(2027, 10, 11, 12, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 12, 12, tzinfo=UTC),
+                eligible_people=[PERSON_A],
+            ),
+        ]
+    )
+
+    result = solve_assignment(snapshot)
+
+    assert result.status == "OPTIMAL"
+    assert result.filled_count == 1
+    assert result.unfilled_count == 1
+
+
+def test_solver_respects_rest_between_slots() -> None:
+    snapshot = make_snapshot_with_slots(
+        slots=[
+            make_slot(
+                "slot-1",
+                starts_at=datetime(2027, 10, 10, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 11, 18, tzinfo=UTC),
+                rest_minutes=1440,
+                eligible_people=[PERSON_A],
+            ),
+            make_slot(
+                "slot-2",
+                starts_at=datetime(2027, 10, 12, 10, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 13, 10, tzinfo=UTC),
+                eligible_people=[PERSON_A],
+            ),
+        ]
+    )
+
+    result = solve_assignment(snapshot)
+
+    assert result.status == "OPTIMAL"
+    assert result.filled_count == 1
+    assert result.unfilled_count == 1
+
+
+def test_solver_allows_assignment_when_rest_is_exactly_completed() -> None:
+    snapshot = make_snapshot_with_slots(
+        slots=[
+            make_slot(
+                "slot-1",
+                starts_at=datetime(2027, 10, 10, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 11, 18, tzinfo=UTC),
+                rest_minutes=1440,
+                eligible_people=[PERSON_A],
+            ),
+            make_slot(
+                "slot-2",
+                starts_at=datetime(2027, 10, 12, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 13, 18, tzinfo=UTC),
+                eligible_people=[PERSON_A],
+            ),
+        ]
+    )
+
+    result = solve_assignment(snapshot)
+
+    assert result.status == "OPTIMAL"
+    assert result.filled_count == 2
+    assert result.unfilled_count == 0
+
+
+def test_solver_uses_another_person_when_first_person_has_rest_conflict() -> None:
+    snapshot = make_snapshot_with_slots(
+        slots=[
+            make_slot(
+                "slot-1",
+                starts_at=datetime(2027, 10, 10, 18, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 11, 18, tzinfo=UTC),
+                rest_minutes=1440,
+                eligible_people=[PERSON_A],
+            ),
+            make_slot(
+                "slot-2",
+                starts_at=datetime(2027, 10, 12, 10, tzinfo=UTC),
+                ends_at=datetime(2027, 10, 13, 10, tzinfo=UTC),
+                eligible_people=[
+                    PERSON_A,
+                    PERSON_B,
+                ],
+            ),
+        ]
+    )
+
+    result = solve_assignment(snapshot)
+
+    assert result.status == "OPTIMAL"
+    assert result.filled_count == 2
+    assert result.unfilled_count == 0
+
+    assignments = {assignment.slot_id: assignment.person_id for assignment in result.assignments}
+
+    assert assignments["slot-1"] == PERSON_A
+    assert assignments["slot-2"] == PERSON_B

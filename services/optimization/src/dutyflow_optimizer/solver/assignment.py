@@ -284,7 +284,27 @@ def _add_load_fairness(
 
     model.add(total_assigned_load == sum(total_assigned_terms))
 
-    max_scaled_deviation = total_load_points * total_fairness_weight
+    # Историческая поправка ограничена долей от потенциальной
+    # целевой нагрузки текущего периода. При полном coverage это
+    # ровно max_history_correction_percent от текущей цели.
+    #
+    # Даже при экстремальной истории прошлые месяцы не смогут
+    # полностью "перетянуть" новый график на себя.
+    history_corrections = {
+        person.id: _history_correction_points(
+            actual_load_points=person.history.actual_load_points,
+            expected_load_points=person.history.expected_load_points,
+            fairness_weight=person.fairness_weight,
+            total_fairness_weight=total_fairness_weight,
+            total_load_points=total_load_points,
+            max_correction_percent=(snapshot.settings.max_history_correction_percent),
+        )
+        for person in participating_people
+    }
+
+    # Коррекция может смещать цель вверх или вниз максимум на 100%
+    # базовой доли, поэтому удвоенного диапазона достаточно.
+    max_scaled_deviation = 2 * total_load_points * total_fairness_weight
 
     deviations: list[cp_model.IntVar] = []
 
@@ -307,18 +327,32 @@ def _add_load_fairness(
             f"load_deviation_{person.id}",
         )
 
-        # Идеальная доля человека:
+        correction_points = history_corrections[person.id]
+
+        # Базовая цель:
         #
-        # total_assigned_load * fairness_weight / total_fairness_weight
+        # total_assigned_load
+        #     * fairness_weight
+        #     / total_fairness_weight
         #
-        # Деления в CP-SAT избегаем и сравниваем масштабированные значения:
+        # Затем добавляем ограниченную историческую поправку:
         #
-        # planned_load * total_fairness_weight
-        #     против
-        # total_assigned_load * fairness_weight
+        # expected_history - actual_history
+        #
+        # Если человек был перегружен, correction отрицательная.
+        # Если был недогружен — положительная.
+        #
+        # Деления в CP-SAT избегаем и работаем
+        # в масштабированных целых значениях.
+        target_scaled = (
+            total_assigned_load * person.fairness_weight + correction_points * total_fairness_weight
+        )
+
+        planned_scaled = planned_load * total_fairness_weight
+
         model.add_abs_equality(
             deviation,
-            (planned_load * total_fairness_weight - total_assigned_load * person.fairness_weight),
+            planned_scaled - target_scaled,
         )
 
         deviations.append(deviation)
@@ -333,6 +367,39 @@ def _add_load_fairness(
         model.add(max_deviation >= deviation)
 
     return max_deviation, deviations
+
+
+def _history_correction_points(
+    *,
+    actual_load_points: int,
+    expected_load_points: int,
+    fairness_weight: int,
+    total_fairness_weight: int,
+    total_load_points: int,
+    max_correction_percent: int,
+) -> int:
+    if fairness_weight == 0 or total_fairness_weight == 0 or max_correction_percent == 0:
+        return 0
+
+    history_debt = expected_load_points - actual_load_points
+
+    # Базовая потенциальная цель человека на текущий период.
+    # Берём floor, чтобы поправка гарантированно не превысила
+    # установленный процент.
+    correction_limit = (
+        total_load_points
+        * fairness_weight
+        * max_correction_percent
+        // (total_fairness_weight * 100)
+    )
+
+    return max(
+        -correction_limit,
+        min(
+            history_debt,
+            correction_limit,
+        ),
+    )
 
 
 def _build_result(

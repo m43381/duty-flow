@@ -47,11 +47,6 @@ def solve_assignment(
 
     # Один человек не может одновременно стоять
     # в двух конфликтующих слотах.
-    #
-    # Конфликт существует, если:
-    # - интервалы нарядов пересекаются;
-    # - либо после первого наряда не успевает пройти
-    #   обязательный rest_minutes.
     for first_slot, second_slot in combinations(
         snapshot.slots,
         2,
@@ -128,40 +123,231 @@ def solve_assignment(
         )
 
         if constraint.type == "FORCE":
-            # Контракт уже гарантирует, что FORCE
-            # ссылается на eligible person.
             if variable is None:
                 raise ValueError("FORCE constraint has no assignment variable")
 
             model.add(variable == 1)
 
         elif constraint.type == "FORBID":
-            # FORBID может относиться к человеку,
-            # который и так не eligible.
             if variable is not None:
                 model.add(variable == 0)
 
-    # Первый objective:
-    # минимизировать количество незаполненных мест.
-    model.minimize(sum(unfilled_vars.values()))
-
     solver = cp_model.CpSolver()
-
     solver.parameters.max_time_in_seconds = float(snapshot.settings.time_limit_seconds)
 
+    # Этап 1.
+    # Сначала минимизируем число незаполненных слотов.
+    model.minimize(sum(unfilled_vars.values()))
+
     status = solver.solve(model)
-    status_name = _status_name(status)
 
     if status not in (
         cp_model.OPTIMAL,
         cp_model.FEASIBLE,
     ):
-        return AssignmentOptimizationResult(
-            status=status_name,
-            filled_count=0,
-            unfilled_count=0,
+        return _empty_result(status)
+
+    # Если solver не доказал оптимальность coverage за отведённое время,
+    # не переходим к fairness и возвращаем лучшее найденное решение.
+    if status != cp_model.OPTIMAL:
+        return _build_result(
+            snapshot,
+            solver,
+            status,
+            assignment_vars,
+            unfilled_vars,
         )
 
+    best_unfilled = sum(solver.value(variable) for variable in unfilled_vars.values())
+
+    # Fairness никогда не имеет права ухудшить coverage.
+    model.add(sum(unfilled_vars.values()) == best_unfilled)
+
+    fairness = _add_load_fairness(
+        model,
+        snapshot,
+        assignment_vars,
+    )
+
+    # Если fairness посчитать не для кого, coverage-решение уже финальное.
+    if fairness is None:
+        return _build_result(
+            snapshot,
+            solver,
+            status,
+            assignment_vars,
+            unfilled_vars,
+        )
+
+    max_deviation, deviations = fairness
+
+    # Этап 2.
+    # Минимизируем худшее отклонение от целевой нагрузки.
+    model.minimize(max_deviation)
+
+    status = solver.solve(model)
+
+    if status not in (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
+    ):
+        return _empty_result(status)
+
+    if status != cp_model.OPTIMAL:
+        return _build_result(
+            snapshot,
+            solver,
+            status,
+            assignment_vars,
+            unfilled_vars,
+        )
+
+    best_max_deviation = solver.value(max_deviation)
+
+    # Следующий этап не может ухудшить уже достигнутый worst-case.
+    model.add(max_deviation == best_max_deviation)
+
+    # Этап 3.
+    # Среди решений с тем же worst-case минимизируем
+    # суммарное отклонение всех людей.
+    model.minimize(sum(deviations))
+
+    status = solver.solve(model)
+
+    if status not in (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
+    ):
+        return _empty_result(status)
+
+    return _build_result(
+        snapshot,
+        solver,
+        status,
+        assignment_vars,
+        unfilled_vars,
+    )
+
+
+def _add_load_fairness(
+    model: cp_model.CpModel,
+    snapshot: AssignmentOptimizationSnapshot,
+    assignment_vars: dict[
+        tuple[str, UUID],
+        cp_model.IntVar,
+    ],
+) -> tuple[cp_model.IntVar, list[cp_model.IntVar]] | None:
+    slot_by_id = {slot.id: slot for slot in snapshot.slots}
+
+    person_variables: dict[
+        UUID,
+        list[tuple[cp_model.IntVar, int]],
+    ] = {}
+
+    total_load_points = sum(slot.load_points for slot in snapshot.slots)
+
+    if total_load_points == 0:
+        return None
+
+    total_assigned_terms = []
+
+    for (slot_id, person_id), variable in assignment_vars.items():
+        load_points = slot_by_id[slot_id].load_points
+
+        total_assigned_terms.append(load_points * variable)
+
+        person_variables.setdefault(
+            person_id,
+            [],
+        ).append(
+            (
+                variable,
+                load_points,
+            )
+        )
+
+    if not person_variables:
+        return None
+
+    participating_people = [person for person in snapshot.people if person.id in person_variables]
+
+    total_fairness_weight = sum(person.fairness_weight for person in participating_people)
+
+    if total_fairness_weight == 0:
+        return None
+
+    total_assigned_load = model.new_int_var(
+        0,
+        total_load_points,
+        "total_assigned_load",
+    )
+
+    model.add(total_assigned_load == sum(total_assigned_terms))
+
+    max_scaled_deviation = total_load_points * total_fairness_weight
+
+    deviations: list[cp_model.IntVar] = []
+
+    for person in participating_people:
+        planned_load = model.new_int_var(
+            0,
+            total_load_points,
+            f"planned_load_{person.id}",
+        )
+
+        person_load_terms = [
+            load_points * variable for variable, load_points in person_variables[person.id]
+        ]
+
+        model.add(planned_load == sum(person_load_terms))
+
+        deviation = model.new_int_var(
+            0,
+            max_scaled_deviation,
+            f"load_deviation_{person.id}",
+        )
+
+        # Идеальная доля человека:
+        #
+        # total_assigned_load * fairness_weight / total_fairness_weight
+        #
+        # Деления в CP-SAT избегаем и сравниваем масштабированные значения:
+        #
+        # planned_load * total_fairness_weight
+        #     против
+        # total_assigned_load * fairness_weight
+        model.add_abs_equality(
+            deviation,
+            (planned_load * total_fairness_weight - total_assigned_load * person.fairness_weight),
+        )
+
+        deviations.append(deviation)
+
+    max_deviation = model.new_int_var(
+        0,
+        max_scaled_deviation,
+        "max_load_deviation",
+    )
+
+    for deviation in deviations:
+        model.add(max_deviation >= deviation)
+
+    return max_deviation, deviations
+
+
+def _build_result(
+    snapshot: AssignmentOptimizationSnapshot,
+    solver: cp_model.CpSolver,
+    status: int,
+    assignment_vars: dict[
+        tuple[str, UUID],
+        cp_model.IntVar,
+    ],
+    unfilled_vars: dict[
+        str,
+        cp_model.IntVar,
+    ],
+) -> AssignmentOptimizationResult:
     assignments: list[AssignmentDecision] = []
     unfilled_slots: list[str] = []
 
@@ -191,11 +377,21 @@ def solve_assignment(
             unfilled_slots.append(slot.id)
 
     return AssignmentOptimizationResult(
-        status=status_name,
+        status=_status_name(status),
         assignments=assignments,
         unfilled_slots=unfilled_slots,
         filled_count=len(assignments),
         unfilled_count=len(unfilled_slots),
+    )
+
+
+def _empty_result(
+    status: int,
+) -> AssignmentOptimizationResult:
+    return AssignmentOptimizationResult(
+        status=_status_name(status),
+        filled_count=0,
+        unfilled_count=0,
     )
 
 

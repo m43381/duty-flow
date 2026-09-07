@@ -1,5 +1,6 @@
 from datetime import timedelta
 from itertools import combinations
+from typing import Literal
 from uuid import UUID
 
 from ortools.sat.python import cp_model
@@ -8,8 +9,15 @@ from dutyflow_optimizer.contracts import (
     AssignmentDecision,
     AssignmentOptimizationResult,
     AssignmentOptimizationSnapshot,
+    PersonSnapshot,
     PositionSlotSnapshot,
 )
+
+FairnessDimension = Literal[
+    "total",
+    "weekend",
+    "holiday",
+]
 
 
 def solve_assignment(
@@ -35,10 +43,12 @@ def solve_assignment(
             variable = model.new_bool_var(f"x_{slot.id}_{person_id}")
 
             assignment_vars[(slot.id, person_id)] = variable
+
             slot_assignment_vars.append(variable)
 
         # u[slot] = 1 означает, что slot остался незаполненным.
         unfilled = model.new_bool_var(f"unfilled_{slot.id}")
+
         unfilled_vars[slot.id] = unfilled
 
         # Для каждого slot должно выполняться ровно одно:
@@ -135,20 +145,14 @@ def solve_assignment(
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(snapshot.settings.time_limit_seconds)
 
-    # Этап 1.
-    # Сначала минимизируем число незаполненных слотов.
+    # Этап 1: coverage.
     model.minimize(sum(unfilled_vars.values()))
 
     status = solver.solve(model)
 
-    if status not in (
-        cp_model.OPTIMAL,
-        cp_model.FEASIBLE,
-    ):
+    if not _has_solution(status):
         return _empty_result(status)
 
-    # Если solver не доказал оптимальность coverage за отведённое время,
-    # не переходим к fairness и возвращаем лучшее найденное решение.
     if status != cp_model.OPTIMAL:
         return _build_result(
             snapshot,
@@ -160,65 +164,96 @@ def solve_assignment(
 
     best_unfilled = sum(solver.value(variable) for variable in unfilled_vars.values())
 
-    # Fairness никогда не имеет права ухудшить coverage.
+    # Ни один следующий fairness-этап не имеет права
+    # ухудшить максимально возможное заполнение.
     model.add(sum(unfilled_vars.values()) == best_unfilled)
 
-    fairness = _add_load_fairness(
+    # Этапы 2-3: главная fairness по общей нагрузке.
+    total_fairness = _add_fairness_dimension(
         model,
         snapshot,
         assignment_vars,
+        dimension="total",
     )
 
-    # Если fairness посчитать не для кого, coverage-решение уже финальное.
-    if fairness is None:
-        return _build_result(
-            snapshot,
+    if total_fairness is not None:
+        status, completed = _optimize_fairness_dimension(
+            model,
             solver,
-            status,
-            assignment_vars,
-            unfilled_vars,
+            total_fairness,
         )
 
-    max_deviation, deviations = fairness
+        if not _has_solution(status):
+            return _empty_result(status)
 
-    # Этап 2.
-    # Минимизируем худшее отклонение от целевой нагрузки.
-    model.minimize(max_deviation)
+        if not completed:
+            return _build_result(
+                snapshot,
+                solver,
+                status,
+                assignment_vars,
+                unfilled_vars,
+            )
 
-    status = solver.solve(model)
+    # Этапы 4-5: fairness по выходным.
+    #
+    # Общая нагрузка уже зафиксирована на лучшем уровне,
+    # поэтому выходные не могут ухудшить основной баланс.
+    weekend_fairness = _add_fairness_dimension(
+        model,
+        snapshot,
+        assignment_vars,
+        dimension="weekend",
+    )
 
-    if status not in (
-        cp_model.OPTIMAL,
-        cp_model.FEASIBLE,
-    ):
-        return _empty_result(status)
-
-    if status != cp_model.OPTIMAL:
-        return _build_result(
-            snapshot,
+    if weekend_fairness is not None:
+        status, completed = _optimize_fairness_dimension(
+            model,
             solver,
-            status,
-            assignment_vars,
-            unfilled_vars,
+            weekend_fairness,
         )
 
-    best_max_deviation = solver.value(max_deviation)
+        if not _has_solution(status):
+            return _empty_result(status)
 
-    # Следующий этап не может ухудшить уже достигнутый worst-case.
-    model.add(max_deviation == best_max_deviation)
+        if not completed:
+            return _build_result(
+                snapshot,
+                solver,
+                status,
+                assignment_vars,
+                unfilled_vars,
+            )
 
-    # Этап 3.
-    # Среди решений с тем же worst-case минимизируем
-    # суммарное отклонение всех людей.
-    model.minimize(sum(deviations))
+    # Этапы 6-7: fairness по праздникам.
+    #
+    # Она идёт после общей нагрузки и выходных,
+    # поэтому является более низким приоритетом.
+    holiday_fairness = _add_fairness_dimension(
+        model,
+        snapshot,
+        assignment_vars,
+        dimension="holiday",
+    )
 
-    status = solver.solve(model)
+    if holiday_fairness is not None:
+        status, completed = _optimize_fairness_dimension(
+            model,
+            solver,
+            holiday_fairness,
+        )
 
-    if status not in (
-        cp_model.OPTIMAL,
-        cp_model.FEASIBLE,
-    ):
-        return _empty_result(status)
+        if not _has_solution(status):
+            return _empty_result(status)
+
+        if not completed:
+            return _build_result(
+                snapshot,
+                solver,
+                status,
+                assignment_vars,
+                unfilled_vars,
+            )
 
     return _build_result(
         snapshot,
@@ -229,14 +264,70 @@ def solve_assignment(
     )
 
 
-def _add_load_fairness(
+def _optimize_fairness_dimension(
+    model: cp_model.CpModel,
+    solver: cp_model.CpSolver,
+    fairness: tuple[
+        cp_model.IntVar,
+        list[cp_model.IntVar],
+    ],
+) -> tuple[int, bool]:
+    max_deviation, deviations = fairness
+
+    # Сначала минимизируем худшее индивидуальное отклонение.
+    model.minimize(max_deviation)
+
+    status = solver.solve(model)
+
+    if not _has_solution(status):
+        return status, False
+
+    if status != cp_model.OPTIMAL:
+        return status, False
+
+    best_max_deviation = solver.value(max_deviation)
+
+    model.add(max_deviation == best_max_deviation)
+
+    # Затем, не ухудшая worst-case, минимизируем
+    # сумму отклонений всех людей.
+    total_deviation = sum(deviations)
+
+    model.minimize(total_deviation)
+
+    status = solver.solve(model)
+
+    if not _has_solution(status):
+        return status, False
+
+    if status != cp_model.OPTIMAL:
+        return status, False
+
+    best_total_deviation = sum(solver.value(deviation) for deviation in deviations)
+
+    # Следующая fairness-размерность не имеет права
+    # ухудшить уже найденный optimum этой размерности.
+    model.add(total_deviation == best_total_deviation)
+
+    return status, True
+
+
+def _add_fairness_dimension(
     model: cp_model.CpModel,
     snapshot: AssignmentOptimizationSnapshot,
     assignment_vars: dict[
         tuple[str, UUID],
         cp_model.IntVar,
     ],
-) -> tuple[cp_model.IntVar, list[cp_model.IntVar]] | None:
+    *,
+    dimension: FairnessDimension,
+) -> (
+    tuple[
+        cp_model.IntVar,
+        list[cp_model.IntVar],
+    ]
+    | None
+):
     slot_by_id = {slot.id: slot for slot in snapshot.slots}
 
     person_variables: dict[
@@ -244,15 +335,32 @@ def _add_load_fairness(
         list[tuple[cp_model.IntVar, int]],
     ] = {}
 
-    total_load_points = sum(slot.load_points for slot in snapshot.slots)
+    total_dimension_load = sum(
+        _slot_dimension_load(
+            slot,
+            dimension,
+        )
+        for slot in snapshot.slots
+    )
 
-    if total_load_points == 0:
+    if total_dimension_load == 0:
         return None
 
     total_assigned_terms = []
 
-    for (slot_id, person_id), variable in assignment_vars.items():
-        load_points = slot_by_id[slot_id].load_points
+    for (
+        slot_id,
+        person_id,
+    ), variable in assignment_vars.items():
+        slot = slot_by_id[slot_id]
+
+        load_points = _slot_dimension_load(
+            slot,
+            dimension,
+        )
+
+        if load_points == 0:
+            continue
 
         total_assigned_terms.append(load_points * variable)
 
@@ -278,41 +386,42 @@ def _add_load_fairness(
 
     total_assigned_load = model.new_int_var(
         0,
-        total_load_points,
-        "total_assigned_load",
+        total_dimension_load,
+        f"{dimension}_assigned_load",
     )
 
     model.add(total_assigned_load == sum(total_assigned_terms))
 
-    # Историческая поправка ограничена долей от потенциальной
-    # целевой нагрузки текущего периода. При полном coverage это
-    # ровно max_history_correction_percent от текущей цели.
-    #
-    # Даже при экстремальной истории прошлые месяцы не смогут
-    # полностью "перетянуть" новый график на себя.
     history_corrections = {
         person.id: _history_correction_points(
-            actual_load_points=person.history.actual_load_points,
-            expected_load_points=person.history.expected_load_points,
+            actual_load_points=_history_actual(
+                person,
+                dimension,
+            ),
+            expected_load_points=_history_expected(
+                person,
+                dimension,
+            ),
             fairness_weight=person.fairness_weight,
             total_fairness_weight=total_fairness_weight,
-            total_load_points=total_load_points,
+            total_load_points=total_dimension_load,
             max_correction_percent=(snapshot.settings.max_history_correction_percent),
         )
         for person in participating_people
     }
 
-    # Коррекция может смещать цель вверх или вниз максимум на 100%
-    # базовой доли, поэтому удвоенного диапазона достаточно.
-    max_scaled_deviation = 2 * total_load_points * total_fairness_weight
+    # Историческая поправка может сместить цель максимум
+    # на 100% базовой доли, поэтому удвоенного диапазона
+    # достаточно для absolute deviation.
+    max_scaled_deviation = 2 * total_dimension_load * total_fairness_weight
 
     deviations: list[cp_model.IntVar] = []
 
     for person in participating_people:
         planned_load = model.new_int_var(
             0,
-            total_load_points,
-            f"planned_load_{person.id}",
+            total_dimension_load,
+            f"{dimension}_planned_load_{person.id}",
         )
 
         person_load_terms = [
@@ -324,7 +433,7 @@ def _add_load_fairness(
         deviation = model.new_int_var(
             0,
             max_scaled_deviation,
-            f"load_deviation_{person.id}",
+            f"{dimension}_deviation_{person.id}",
         )
 
         correction_points = history_corrections[person.id]
@@ -335,15 +444,11 @@ def _add_load_fairness(
         #     * fairness_weight
         #     / total_fairness_weight
         #
-        # Затем добавляем ограниченную историческую поправку:
+        # Историческая поправка:
         #
         # expected_history - actual_history
         #
-        # Если человек был перегружен, correction отрицательная.
-        # Если был недогружен — положительная.
-        #
-        # Деления в CP-SAT избегаем и работаем
-        # в масштабированных целых значениях.
+        # Все вычисления остаются целочисленными.
         target_scaled = (
             total_assigned_load * person.fairness_weight + correction_points * total_fairness_weight
         )
@@ -360,13 +465,67 @@ def _add_load_fairness(
     max_deviation = model.new_int_var(
         0,
         max_scaled_deviation,
-        "max_load_deviation",
+        f"{dimension}_max_deviation",
     )
 
     for deviation in deviations:
         model.add(max_deviation >= deviation)
 
     return max_deviation, deviations
+
+
+def _slot_dimension_load(
+    slot: PositionSlotSnapshot,
+    dimension: FairnessDimension,
+) -> int:
+    if dimension == "total":
+        return slot.load_points
+
+    if dimension == "weekend":
+        if slot.calendar.is_weekend:
+            return slot.load_points
+
+        return 0
+
+    if dimension == "holiday":
+        if slot.calendar.is_holiday:
+            return slot.load_points
+
+        return 0
+
+    raise ValueError(f"unsupported fairness dimension: {dimension}")
+
+
+def _history_actual(
+    person: PersonSnapshot,
+    dimension: FairnessDimension,
+) -> int:
+    if dimension == "total":
+        return person.history.actual_load_points
+
+    if dimension == "weekend":
+        return person.history.weekend_load_points
+
+    if dimension == "holiday":
+        return person.history.holiday_load_points
+
+    raise ValueError(f"unsupported fairness dimension: {dimension}")
+
+
+def _history_expected(
+    person: PersonSnapshot,
+    dimension: FairnessDimension,
+) -> int:
+    if dimension == "total":
+        return person.history.expected_load_points
+
+    if dimension == "weekend":
+        return person.history.expected_weekend_load_points
+
+    if dimension == "holiday":
+        return person.history.expected_holiday_load_points
+
+    raise ValueError(f"unsupported fairness dimension: {dimension}")
 
 
 def _history_correction_points(
@@ -383,9 +542,6 @@ def _history_correction_points(
 
     history_debt = expected_load_points - actual_load_points
 
-    # Базовая потенциальная цель человека на текущий период.
-    # Берём floor, чтобы поправка гарантированно не превысила
-    # установленный процент.
     correction_limit = (
         total_load_points
         * fairness_weight
@@ -459,6 +615,13 @@ def _empty_result(
         status=_status_name(status),
         filled_count=0,
         unfilled_count=0,
+    )
+
+
+def _has_solution(status: int) -> bool:
+    return status in (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
     )
 
 

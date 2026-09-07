@@ -1,3 +1,5 @@
+from datetime import timedelta
+from itertools import combinations
 from uuid import UUID
 
 from ortools.sat.python import cp_model
@@ -6,6 +8,7 @@ from dutyflow_optimizer.contracts import (
     AssignmentDecision,
     AssignmentOptimizationResult,
     AssignmentOptimizationSnapshot,
+    PositionSlotSnapshot,
 )
 
 
@@ -24,8 +27,7 @@ def solve_assignment(
         cp_model.IntVar,
     ] = {}
 
-    # x[slot, person] = 1
-    # означает, что person назначен в slot.
+    # x[slot, person] = 1 означает, что person назначен в slot.
     for slot in snapshot.slots:
         slot_assignment_vars: list[cp_model.IntVar] = []
 
@@ -33,20 +35,51 @@ def solve_assignment(
             variable = model.new_bool_var(f"x_{slot.id}_{person_id}")
 
             assignment_vars[(slot.id, person_id)] = variable
-
             slot_assignment_vars.append(variable)
 
-        # u[slot] = 1
-        # означает, что slot остался незаполненным.
+        # u[slot] = 1 означает, что slot остался незаполненным.
         unfilled = model.new_bool_var(f"unfilled_{slot.id}")
-
         unfilled_vars[slot.id] = unfilled
 
         # Для каждого slot должно выполняться ровно одно:
-        #
-        # либо назначен один человек,
-        # либо slot явно UNFILLED.
+        # либо назначен один человек, либо slot явно UNFILLED.
         model.add(sum(slot_assignment_vars) + unfilled == 1)
+
+    # Один человек не может одновременно стоять
+    # в двух конфликтующих слотах.
+    #
+    # Конфликт существует, если:
+    # - интервалы нарядов пересекаются;
+    # - либо после первого наряда не успевает пройти
+    #   обязательный rest_minutes.
+    for first_slot, second_slot in combinations(
+        snapshot.slots,
+        2,
+    ):
+        if not _slots_conflict(
+            first_slot,
+            second_slot,
+        ):
+            continue
+
+        common_people = set(first_slot.eligible_people) & set(second_slot.eligible_people)
+
+        for person_id in common_people:
+            first_variable = assignment_vars[
+                (
+                    first_slot.id,
+                    person_id,
+                )
+            ]
+
+            second_variable = assignment_vars[
+                (
+                    second_slot.id,
+                    person_id,
+                )
+            ]
+
+            model.add(first_variable + second_variable <= 1)
 
     # Locked назначения обязаны сохраниться.
     for assignment in snapshot.existing_assignments:
@@ -86,7 +119,6 @@ def solve_assignment(
                 model.add(variable == 0)
 
     # Первый objective:
-    #
     # минимизировать количество незаполненных мест.
     model.minimize(sum(unfilled_vars.values()))
 
@@ -95,7 +127,6 @@ def solve_assignment(
     solver.parameters.max_time_in_seconds = float(snapshot.settings.time_limit_seconds)
 
     status = solver.solve(model)
-
     status_name = _status_name(status)
 
     if status not in (
@@ -143,6 +174,23 @@ def solve_assignment(
         filled_count=len(assignments),
         unfilled_count=len(unfilled_slots),
     )
+
+
+def _slots_conflict(
+    first_slot: PositionSlotSnapshot,
+    second_slot: PositionSlotSnapshot,
+) -> bool:
+    if second_slot.starts_at < first_slot.starts_at:
+        first_slot, second_slot = (
+            second_slot,
+            first_slot,
+        )
+
+    protected_until = first_slot.ends_at + timedelta(
+        minutes=first_slot.rest_minutes,
+    )
+
+    return protected_until > second_slot.starts_at
 
 
 def _status_name(status: int) -> str:

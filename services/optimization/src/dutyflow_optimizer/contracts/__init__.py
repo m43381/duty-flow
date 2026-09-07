@@ -9,8 +9,16 @@ from dutyflow_optimizer.contracts.assignment import (
     PersonSnapshot,
     PositionSlotSnapshot,
 )
+from dutyflow_optimizer.contracts.result import (
+    AssignmentDecision,
+    AssignmentOptimizationResult,
+    SolverStatus,
+)
 
 __all__ = [
+    "AssignmentDecision",
+    "AssignmentOptimizationResult",
+    "SolverStatus",
     "AssignmentOptimizationSnapshot",
     "CalendarFlags",
     "ExistingAssignmentSnapshot",
